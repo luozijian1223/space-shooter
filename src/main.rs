@@ -46,33 +46,83 @@ impl GameObject {
     }
 }
 
+struct Player {
+    game_object: GameObject,
+    lives: u32,
+    invincible_timer: f32,  // 受伤后的短暂无敌时间
+}
+
+impl Player {
+    fn new(x: f32, y: f32) -> Self {
+        Self {
+            game_object: GameObject::new(x, y, 30.0, 30.0),
+            lives: 3,  // 初始3条命
+            invincible_timer: 0.0,
+        }
+    }
+    
+    // 当玩家受到伤害时调用
+    fn take_damage(&mut self) -> bool {
+        if self.invincible_timer <= 0.0 {
+            self.lives -= 1;
+            self.invincible_timer = 2.0;  // 2秒无敌时间
+            return true;
+        }
+        false
+    }
+    
+    // 更新玩家状态，包括无敌时间
+    fn update(&mut self, dt: f32) {
+        if self.invincible_timer > 0.0 {
+            self.invincible_timer -= dt;
+        }
+    }
+    
+    // 检查玩家是否处于无敌状态
+    fn is_invincible(&self) -> bool {
+        self.invincible_timer > 0.0
+    }
+}
+
 struct MainState {
-    player: GameObject,
+    player: Player,
     bullets: Vec<GameObject>,
     enemies: Vec<GameObject>,
+    powerups: Vec<GameObject>,  // 新增道具列表
     score: u32,
     game_over: bool,
     spawn_timer: f32,
+    powerup_timer: f32,  // 道具生成计时器
 }
 
 impl MainState {
     fn new() -> Self {
-        let player = GameObject::new(
+        let player = Player::new(
             WINDOW_WIDTH / 2.0,
             WINDOW_HEIGHT - 50.0,
-            30.0,
-            30.0,
         );
 
         Self {
             player,
             bullets: Vec::new(),
             enemies: Vec::new(),
+            powerups: Vec::new(),  // 初始化为空列表
             score: 0,
             game_over: false,
             spawn_timer: 0.0,
+            powerup_timer: 0.0,
         }
     }
+
+    // 添加生成道具的方法
+    fn spawn_powerup(&mut self) {
+        let mut rng = rand::thread_rng();
+        let x = rng.gen_range(20.0..WINDOW_WIDTH - 20.0);
+        
+        let powerup = GameObject::new(x, -20.0, 20.0, 20.0);
+        self.powerups.push(powerup);
+    }
+    
 
     fn spawn_enemy(&mut self) {
         let mut rng = rand::thread_rng();
@@ -84,7 +134,7 @@ impl MainState {
 
     fn fire_bullet(&mut self) {
         let bullet = GameObject {
-            position: self.player.position - Vec2::new(0.0, 20.0),
+            position: self.player.game_object.position - Vec2::new(0.0, 20.0),
             velocity: Vec2::new(0.0, -BULLET_SPEED),
             size: Vec2::new(5.0, 10.0),
             alive: true,
@@ -102,6 +152,7 @@ impl EventHandler for MainState {
     fn update(&mut self, ctx: &mut Context) -> GameResult<()> {
         let dt = timer::delta(ctx).as_secs_f32();
 
+        // 检查游戏是否结束（生命值为0）
         if self.game_over {
             if ctx.keyboard.is_key_just_pressed(KeyCode::R) {
                 self.reset();
@@ -109,13 +160,16 @@ impl EventHandler for MainState {
             return Ok(());
         }
 
+        // 更新玩家状态，包括无敌时间
+        self.player.update(dt);
+
         // 更新玩家位置
-        self.player.position += self.player.velocity * dt;
+        self.player.game_object.position += self.player.game_object.velocity * dt;
         
         // 保持玩家在屏幕内
-        self.player.position.x = self.player.position.x.clamp(
-            self.player.size.x / 2.0, 
-            WINDOW_WIDTH - self.player.size.x / 2.0
+        self.player.game_object.position.x = self.player.game_object.position.x.clamp(
+            self.player.game_object.size.x / 2.0, 
+            WINDOW_WIDTH - self.player.game_object.size.x / 2.0
         );
 
         // 更新子弹位置
@@ -133,14 +187,21 @@ impl EventHandler for MainState {
         for enemy in &mut self.enemies {
             enemy.position.y += ENEMY_SPEED * dt;
             
-            // 游戏结束条件：敌人到达底部
+            // 敌人到达底部，玩家损失一条命
             if enemy.position.y > WINDOW_HEIGHT + 15.0 {
-                self.game_over = true;
+                enemy.alive = false;
+                if self.player.take_damage() && self.player.lives == 0 {
+                    self.game_over = true;
+                }
             }
 
             // 检测玩家与敌人碰撞
-            if self.player.collides_with(enemy) {
-                self.game_over = true;
+            if !self.player.is_invincible() && 
+               self.player.game_object.collides_with(enemy) {
+                enemy.alive = false;
+                if self.player.take_damage() && self.player.lives == 0 {
+                    self.game_over = true;
+                }
             }
         }
 
@@ -169,14 +230,29 @@ impl EventHandler for MainState {
     fn draw(&mut self, ctx: &mut Context) -> GameResult<()> {
         let mut canvas = graphics::Canvas::from_frame(ctx, Color::BLACK);
 
-        // 绘制玩家
-        let player_mesh = Mesh::new_rectangle(
-            ctx,
-            graphics::DrawMode::fill(),
-            self.player.bounds(),
-            Color::WHITE,
-        )?;
-        canvas.draw(&player_mesh, DrawParam::default());
+        // 绘制玩家，无敌时闪烁效果
+        if !self.player.is_invincible() || 
+           (self.player.is_invincible() && (self.player.invincible_timer * 10.0) as i32 % 2 == 0) {
+            
+            let player_color = if self.player.is_invincible() {
+                Color::new(1.0, 1.0, 0.5, 0.8)  // 受伤后呈现黄色半透明
+            } else {
+                Color::WHITE
+            };
+            
+            let player_mesh = Mesh::new_rectangle(
+                ctx,
+                graphics::DrawMode::fill(),
+                Rect::new(
+                    self.player.game_object.position.x - self.player.game_object.size.x / 2.0,
+                    self.player.game_object.position.y - self.player.game_object.size.y / 2.0,
+                    self.player.game_object.size.x,
+                    self.player.game_object.size.y,
+                ),
+                player_color,
+            )?;
+            canvas.draw(&player_mesh, DrawParam::default());
+        }
 
         // 绘制子弹
         for bullet in &self.bullets {
@@ -206,6 +282,13 @@ impl EventHandler for MainState {
             &score_text,
             DrawParam::default().dest(Vec2::new(10.0, 10.0)),
         );
+        
+        // 绘制生命值
+        let lives_text = graphics::Text::new(format!("生命: {}", self.player.lives));
+        canvas.draw(
+            &lives_text,
+            DrawParam::default().dest(Vec2::new(10.0, 40.0)),
+        );
 
         // 游戏结束提示
         if self.game_over {
@@ -223,14 +306,15 @@ impl EventHandler for MainState {
         Ok(())
     }
 
+    // 修改key_down_event和key_up_event以使用player.game_object
     fn key_down_event(&mut self, _ctx: &mut Context, input: KeyInput, _repeat: bool) -> GameResult<()> {
         if self.game_over {
             return Ok(());
         }
 
         match input.keycode {
-            Some(KeyCode::Left) => self.player.velocity.x = -PLAYER_SPEED,
-            Some(KeyCode::Right) => self.player.velocity.x = PLAYER_SPEED,
+            Some(KeyCode::Left) => self.player.game_object.velocity.x = -PLAYER_SPEED,
+            Some(KeyCode::Right) => self.player.game_object.velocity.x = PLAYER_SPEED,
             Some(KeyCode::Space) => self.fire_bullet(),
             _ => (),
         }
@@ -240,7 +324,7 @@ impl EventHandler for MainState {
     fn key_up_event(&mut self, _ctx: &mut Context, input: KeyInput) -> GameResult<()> {
         match input.keycode {
             Some(KeyCode::Left) | Some(KeyCode::Right) => {
-                self.player.velocity.x = 0.0;
+                self.player.game_object.velocity.x = 0.0;
             }
             _ => (),
         }
